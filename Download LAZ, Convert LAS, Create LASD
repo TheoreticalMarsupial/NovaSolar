@@ -1,0 +1,189 @@
+import arcpy
+import requests
+import os
+import time
+
+def check_path_accessible(path):
+    """Check if a path is accessible."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"The path {path} does not exist.")
+    if not os.access(path, os.R_OK):
+        raise PermissionError(f"The path {path} is not readable.")
+    print(f"The path {path} is accessible and readable.")
+
+def display_error_message(url, feature_id, error):
+    """Display an error message with the URL and feature ID causing the issue."""
+    print(f"Error downloading {url} for feature ID {feature_id}: {error}")
+
+def display_completion_message(total_files, downloaded_files):
+    """Display a completion message with the number of files processed and downloaded."""
+    print(f"Download completed. {downloaded_files}/{total_files} files downloaded successfully.")
+
+def get_selected_feature_count(layer):
+    """Get the count of selected features."""
+    selected_count = int(arcpy.GetCount_management(layer).getOutput(0))
+    return selected_count
+
+def check_field_exists(layer, field_name):
+    """Check if a field exists in the layer."""
+    field_names = [field.name for field in arcpy.ListFields(layer)]
+    if field_name not in field_names:
+        raise ValueError(f"The field '{field_name}' does not exist in the feature layer.")
+    print(f"The field '{field_name}' exists in the feature layer.")
+
+def extract_url_from_html(anchor_tag):
+    """Extract the URL from an HTML anchor tag."""
+    try:
+        return anchor_tag.split('"')[1].strip()
+    except IndexError:
+        return None
+
+def download_file(url, file_path, retries=3):
+    """Download a file from a URL with retry logic."""
+    for attempt in range(retries):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            with open(file_path, 'wb') as file:
+                file.write(response.content)
+            return True
+        except requests.exceptions.RequestException as e:
+            if attempt < retries - 1:
+                print(f"Retrying... (Attempt {attempt + 2})")
+            else:
+                print(f"Failed to download {url}: {e}")
+    return False
+
+@measure_execution_time
+def download_files_from_selected_features(feature_layer, download_directory, link_field):
+    # Ensure the output directory is accessible.
+    check_path_accessible(download_directory)
+    
+    # Create LAZ and LAS directories if they don't exist.
+    laz_directory = os.path.join(download_directory, 'LAZ')
+    las_directory = os.path.join(download_directory, 'LAS')
+    if not os.path.exists(laz_directory):
+        os.makedirs(laz_directory)
+    if not os.path.exists(las_directory):
+        os.makedirs(las_directory)
+
+    # Check if the link field exists in the feature layer
+    check_field_exists(feature_layer, link_field)
+
+    # Get the selected features count
+    selected_count = get_selected_feature_count(feature_layer)
+    if selected_count == 0:
+        print("No features selected.")
+        return
+    else:
+        print(f"{selected_count} features selected. Download starting.")
+
+    # Initialize counters
+    total_files = 0
+    downloaded_files = 0
+
+    # Open the feature layer and read the URLs from the specified attribute field for selected features
+    with arcpy.da.SearchCursor(feature_layer, ["OID@", link_field], where_clause="{} IS NOT NULL".format(arcpy.AddFieldDelimiters(feature_layer, link_field))) as cursor:
+        for row in cursor:
+            total_files += 1
+            feature_id = row[0]
+            url = row[1].strip()  # Clean up the URL to remove any leading/trailing whitespace or special characters
+
+            # Extract the actual URL if it is within an HTML anchor tag
+            url = extract_url_from_html(url) if '<a href="' in url else url
+
+            # Get the filename from the URL. This assumes the URL ends with the filename.
+            filename = os.path.basename(url)
+
+            # Define the full path for the download, combining the download directory with the filename.
+            file_path = os.path.join(laz_directory if filename.lower().endswith('.laz') else las_directory, filename)
+
+            # Attempt to download the file using the retry logic.
+            if download_file(url, file_path):
+                downloaded_files += 1
+            else:
+                display_error_message(url, feature_id, "Failed after multiple attempts")
+
+    # Print a completion message when all downloads are finished.
+    print(f"Download completed. {downloaded_files}/{total_files} files downloaded successfully.")
+
+@measure_execution_time
+def convert_laz_to_las(laz_directory, las_directory):
+    """Convert all LAZ files in a directory to LAS files."""
+    print("Starting conversion of LAZ to LAS files...")
+
+    # Ensure the directories are accessible.
+    check_path_accessible(laz_directory)
+    check_path_accessible(las_directory)
+
+    laz_files = [os.path.join(laz_directory, file) for file in os.listdir(laz_directory) if file.lower().endswith('.laz')]
+
+    converted_count = 0
+    for laz_file in laz_files:
+        try:
+            arcpy.conversion.ConvertLas(laz_file, las_directory)
+            converted_count += 1
+        except Exception as e:
+            print(f"Error converting {laz_file} to LAS: {e}")
+
+    print(f"Converted {converted_count} LAZ files to LAS files.")
+
+@measure_execution_time
+def create_las_dataset(las_directory, output_las_dataset):
+    """Create a LAS dataset from multiple LAS files."""
+    print("Starting LAS dataset creation process...")
+
+    check_path_accessible(las_directory)
+
+    las_files = [os.path.join(las_directory, file) for file in os.listdir(las_directory) if file.lower().endswith('.las')]
+
+    num_files = len(las_files)
+
+    if num_files == 0:
+        print("No LAS files found.")
+        return
+
+    try:
+        arcpy.management.CreateLasDataset(las_files, output_las_dataset, "NO_RECURSION", "", "", "COMPUTE_STATS")
+        print(f"{num_files} LAS files added to the LAS dataset successfully.")
+    except Exception as e:
+        print(f"Error creating LAS dataset: {e}")
+
+def measure_execution_time(func):
+    """Decorator to measure the execution time of a function."""
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"Execution time for {func.__name__}: {execution_time:.2f} seconds")
+        return result
+    return wrapper
+
+# Main script
+if __name__ == "__main__":
+    # Feature layer and download directory for downloading files from selected features
+    feature_layer = "TILE LAYER NAME NOT PATHWAY"  # Replace with the name of the feature tile layer in the ArcGIS project
+    download_directory = r"PATHWAY FOR MAIN FILE"  # Replace with your download directory path
+    link_field = "ATTRIBUTE FIELD NAME FOR URL"  # Replace with the attribute field name, not the alias, of the column containing the url link
+
+    # Directories for converting LAZ to LAS and creating LAS dataset
+    laz_directory = os.path.join(download_directory, 'LAZ') # Creates file within the main folder, aka download_directory, to store LAZ files only
+    las_directory = os.path.join(download_directory, 'LAS') # Creates file within the main folder, aka download_directory, to store LAS files only
+    output_las_dataset = r"PATHWAY\FILENAME.LASD"  # Replace with the pathway AND name of the new las dataset with file format .lasd, use the same pathway as download_directory
+
+    # Measure the execution time of the entire workflow
+    start_time = time.time()
+    
+    # Download files from the selected features
+    download_files_from_selected_features(feature_layer, download_directory, link_field)
+
+    # Convert LAZ files to LAS files
+    convert_laz_to_las(laz_directory, las_directory)
+
+    # Create the LAS dataset from the LAS files
+    create_las_dataset(las_directory, output_las_dataset)
+    
+    end_time = time.time()
+    total_execution_time = end_time - start_time
+    print(f"Total execution time: {total_execution_time:.2f} seconds")
