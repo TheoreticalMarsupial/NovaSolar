@@ -1,0 +1,110 @@
+import arcpy
+import requests
+import os
+import time
+import string
+
+def check_path_accessible(path):
+    """Ensure a directory exists and is accessible."""
+    if not os.path.exists(path):
+        os.makedirs(path)
+    if not os.access(path, os.R_OK):
+        raise PermissionError(f"The path {path} is not readable.")
+    print(f"The path {path} is accessible and readable.")
+
+def log_message(log_file, message):
+    """Write messages to a log file."""
+    with open(log_file, "a") as log:
+        log.write(message + "\n")
+    print(message)
+
+def download_file(url, file_path, retries=3):
+    """Download a file with retry logic."""
+    for attempt in range(retries):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            with open(file_path, 'wb') as file:
+                file.write(response.content)
+            return True
+        except requests.exceptions.RequestException as e:
+            if attempt < retries - 1:
+                print(f"Retrying... (Attempt {attempt + 2})")
+            else:
+                print(f"Failed to download {url}: {e}")
+    return False
+
+def process_batch(batch_tiles, batch_name, output_directory, log_file):
+    """Process a batch of tiles: Download, convert, and create LAS dataset."""
+    batch_folder = os.path.join(output_directory, batch_name)
+    laz_folder = os.path.join(batch_folder, "LAZ")
+    las_folder = os.path.join(batch_folder, "LAS")
+    las_dataset_folder = os.path.join(batch_folder, "LAS_Dataset")
+    
+    for folder in [batch_folder, laz_folder, las_folder, las_dataset_folder]:
+        check_path_accessible(folder)
+    
+    log_message(log_file, f"Processing {batch_name} with {len(batch_tiles)} tiles.")
+    
+    # Download LAZ files
+    downloaded_files = []
+    for file_name, url in batch_tiles:
+        filename = os.path.basename(url)
+        file_path = os.path.join(laz_folder, filename)
+        if download_file(url, file_path):
+            downloaded_files.append(file_path)
+    log_message(log_file, f"Downloaded {len(downloaded_files)} out of {len(batch_tiles)} LAZ files for batch {batch_name}.")
+    
+    # Convert LAZ to LAS
+    converted_files = []
+    for laz_file in downloaded_files:
+        las_file = os.path.join(las_folder, os.path.basename(laz_file).replace(".laz", ".las"))
+        try:
+            arcpy.conversion.ConvertLas(laz_file, las_folder)
+            if os.path.exists(las_file):  # Ensure LAS file was created
+                converted_files.append(las_file)
+        except Exception as e:
+            log_message(log_file, f"Error converting {laz_file} to LAS: {e}")
+    log_message(log_file, f"Converted {len(converted_files)} out of {len(downloaded_files)} LAS files for batch {batch_name}.")
+    
+    # Pause to ensure file system updates before LAS dataset creation
+    time.sleep(2)
+    
+    # Create LAS dataset
+    lasd_path = os.path.join(las_dataset_folder, f"{batch_name}.lasd")
+    if converted_files:
+        try:
+            arcpy.management.CreateLasDataset(converted_files, lasd_path, "NO_RECURSION", "", "", "COMPUTE_STATS")
+            log_message(log_file, f"LAS dataset created from {len(converted_files)} LAS files for batch {batch_name}: {lasd_path}")
+        except Exception as e:
+            log_message(log_file, f"Error creating LAS dataset: {e}")
+    else:
+        log_message(log_file, f"No valid LAS files for {batch_name}. Skipping LAS dataset creation.")
+
+def main():
+    tile_layer = r"C:\Users\Kperki4\Desktop\2022 LAZ Tiles\26\TileGrid_26.shp"  # Update with correct path
+    output_directory = r"C:\Users\Kperki4\Desktop\2025 Solar\26\New Code"  # Output base directory
+    log_file = os.path.join(output_directory, "processing_log.txt")
+    batch_size = 8
+    batch_prefix = "26"
+    
+    # Read tiles into a list
+    tiles = []
+    with arcpy.da.SearchCursor(tile_layer, ["file_name", "URL"]) as cursor:
+        for row in cursor:
+            tiles.append((row[0], row[1]))
+    
+    # Process in batches
+    batch_index = 0
+    batch_labels = list(string.ascii_uppercase)  # A, B, C, ..., Z
+    
+    for i in range(0, len(tiles), batch_size):
+        batch_tiles = tiles[i:i+batch_size]
+        batch_name = f"{batch_prefix}_{batch_labels[batch_index]}"
+        process_batch(batch_tiles, batch_name, output_directory, log_file)
+        batch_index += 1
+    
+    log_message(log_file, "Processing complete.")
+    
+if __name__ == "__main__":
+    main()
