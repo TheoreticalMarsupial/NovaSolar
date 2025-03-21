@@ -10,8 +10,8 @@ import shutil
 # Requires user to know field name, not alias, of the attribute field containing the urls for data
 # Requires user to know tile grid layer name (not pathway)
 # Requires user to define output pathway for data
-# Best Practice is to create a single file for each data management grid that contains X amount of tile grids
-# Features must be selected in the tile grid layer before running the code
+# Best Practice is to create a single file for each batch of grids to process
+# Features (the tile grids of the selected extent) must be actively selected in the tile grid layer before running the code
 # User Input Section is the only place that you will change code values anchored by quotation marks
 # Do not change anything outside of that section
 
@@ -221,6 +221,7 @@ def cleanup_intermediate_folders(base_download_directory):
                 except Exception as e:
                     print(f"Error deleting {las_folder}: {e}")
 
+# READ ME READ ME READ ME READ ME
 # User Input Section
 if __name__ == "__main__":
     # Feature layer name (as it appears in the ArcGIS project) NOT PATHWAY and the tiles MUST BE selected from this layer
