@@ -4,6 +4,7 @@ import os
 import time
 import shutil
 
+# READ ME READ ME READ ME READ ME
 # Must be processed in ArcGIS Pro using Notebooks
 # Requires tile grid layer containing an attribute field with url links to the lidar data per tile
 # Requires user to know field name, not alias, of the attribute field containing the urls for data
