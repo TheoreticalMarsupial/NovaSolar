@@ -1,0 +1,268 @@
+import arcpy
+import requests
+import os
+import time
+import shutil
+
+def log_message(message, log_file=None):
+    """Log a message with timestamp. If log_file is provided, also append the message there."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    full_message = f"[{timestamp}] {message}"
+    print(full_message)
+    if log_file:
+        try:
+            with open(log_file, "a") as f:
+                f.write(full_message + "\n")
+        except Exception as e:
+            print(f"Could not write to log file {log_file}: {e}")
+
+def check_path_accessible(path):
+    """Check if a path is accessible."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"The path {path} does not exist.")
+    if not os.access(path, os.R_OK):
+        raise PermissionError(f"The path {path} is not readable.")
+    print(f"The path {path} is accessible and readable.")
+
+def display_error_message(url, feature_id, error):
+    """Display an error message with the URL and feature ID causing the issue."""
+    print(f"Error downloading {url} for feature ID {feature_id}: {error}")
+
+def get_selected_feature_count(layer):
+    """Get the count of selected features."""
+    selected_count = int(arcpy.GetCount_management(layer).getOutput(0))
+    return selected_count
+
+def check_field_exists(layer, field_name):
+    """Check if a field exists in the layer."""
+    field_names = [field.name for field in arcpy.ListFields(layer)]
+    if field_name not in field_names:
+        raise ValueError(f"The field '{field_name}' does not exist in the feature layer.")
+    print(f"The field '{field_name}' exists in the feature layer.")
+
+def extract_url_from_html(anchor_tag):
+    """Extract the URL from an HTML anchor tag."""
+    try:
+        return anchor_tag.split('"')[1].strip()
+    except IndexError:
+        return None
+
+def download_file(url, file_path, retries=3):
+    """Download a file from a URL with retry logic."""
+    for attempt in range(retries):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            with open(file_path, 'wb') as file:
+                file.write(response.content)
+            return True
+        except requests.exceptions.RequestException as e:
+            if attempt < retries - 1:
+                print(f"Retrying... (Attempt {attempt + 2})")
+            else:
+                print(f"Failed to download {url}: {e}")
+    return False
+
+def process_tile(feature_id, url, base_download_directory):
+    """
+    Process a single tile:
+      - Create a dedicated folder for the tile.
+      - Download the file from the URL (or skip if already downloaded).
+      - If the file is a LAZ file, convert it to LAS.
+      - For each LAS file produced, convert it individually to a DSM raster.
+      - Log messages and record time metrics for each step.
+      
+    Returns a tuple (success, filename) where success is True if the tile
+    processed completely and False if a major error occurred (download or conversion failure).
+    """
+    tile_start_time = time.time()
+    # Create a unique folder for this tile (using the feature's OID)
+    tile_folder = os.path.join(base_download_directory, f"tile_{feature_id}")
+    laz_directory = os.path.join(tile_folder, 'LAZ')
+    las_directory = os.path.join(tile_folder, 'LAS')
+    dsm_directory = os.path.join(tile_folder, 'DSM')
+    success_marker = os.path.join(tile_folder, "success_marker.txt")
+    
+    # If the tile was already processed successfully, skip reprocessing.
+    if os.path.exists(success_marker):
+        log_file_path = os.path.join(dsm_directory, "log_file.txt")
+        log_message(f"Feature {feature_id} already processed. Skipping.", log_file_path)
+        url = url.strip()
+        if '<a href="' in url:
+            url = extract_url_from_html(url)
+        filename = os.path.basename(url)
+        return (True, filename)
+    
+    # Create directories if they don't exist.
+    for directory in [tile_folder, laz_directory, las_directory, dsm_directory]:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+    
+    # Create log file in the DSM folder
+    log_file_path = os.path.join(dsm_directory, "log_file.txt")
+    log_message(f"Processing feature {feature_id}...", log_file_path)
+    
+    # Clean and extract the URL if needed.
+    url = url.strip()
+    if '<a href="' in url:
+        url = extract_url_from_html(url)
+    
+    # Get the filename from the URL.
+    filename = os.path.basename(url)
+    # Determine download destination based on file extension.
+    if filename.lower().endswith('.laz'):
+        file_path = os.path.join(laz_directory, filename)
+    else:
+        file_path = os.path.join(las_directory, filename)
+    
+    # If the file already exists, assume the download step succeeded.
+    if os.path.exists(file_path):
+        log_message(f"File {file_path} already exists. Skipping download.", log_file_path)
+    else:
+        download_start = time.time()
+        if not download_file(url, file_path):
+            log_message(f"Error: Failed to download {url} after multiple attempts for feature {feature_id}.", log_file_path)
+            return (False, filename)
+        download_duration = time.time() - download_start
+        log_message(f"Downloaded {file_path} for feature {feature_id} in {download_duration:.2f} seconds.", log_file_path)
+    
+    # If the file is LAZ, convert it to LAS and output to the LAS directory.
+    if file_path.lower().endswith('.laz'):
+        conversion_start = time.time()
+        try:
+            arcpy.conversion.ConvertLas(file_path, las_directory)
+            conversion_duration = time.time() - conversion_start
+            log_message(f"Converted {file_path} to LAS files in {las_directory} in {conversion_duration:.2f} seconds.", log_file_path)
+        except Exception as e:
+            log_message(f"Error converting {file_path} to LAS for feature {feature_id}: {e}", log_file_path)
+            return (False, filename)
+        # Pause briefly to allow file system updates.
+        time.sleep(2)
+    
+    # Process each LAS file individually.
+    las_files = [os.path.join(las_directory, f) for f in os.listdir(las_directory) if f.lower().endswith('.las')]
+    if not las_files:
+        log_message(f"No LAS files found for feature {feature_id}.", log_file_path)
+        return (False, filename)
+    
+    for las_file in las_files:
+        # Define DSM output path (use the LAS filename with a _DSM.tif suffix).
+        base_name = os.path.splitext(os.path.basename(las_file))[0]
+        dsm_output = os.path.join(dsm_directory, f"{base_name}_DSM.tif")
+        dsm_start = time.time()
+        try:
+            arcpy.conversion.LasDatasetToRaster(
+                in_las_dataset=las_file,  # process one LAS file at a time
+                out_raster=dsm_output,
+                value_field="ELEVATION",
+                interpolation_type="BINNING MAXIMUM NATURAL_NEIGHBOR",
+                data_type="FLOAT",
+                sampling_type="CELLSIZE",
+                sampling_value=2,  # adjust cell size if necessary
+                z_factor=1         # keep elevation scale unchanged
+            )
+            dsm_duration = time.time() - dsm_start
+            log_message(f"Created DSM raster {dsm_output} for LAS file {las_file} in {dsm_duration:.2f} seconds.", log_file_path)
+        except Exception as e:
+            log_message(f"Error creating DSM for LAS file {las_file} for feature {feature_id}: {e}", log_file_path)
+    
+    total_tile_time = time.time() - tile_start_time
+    log_message(f"Total processing time for feature {feature_id}: {total_tile_time:.2f} seconds.", log_file_path)
+    
+    # Write a success marker so that this tile will be skipped in subsequent runs.
+    try:
+        with open(success_marker, "w") as f:
+            f.write("Tile processed successfully.")
+    except Exception as e:
+        log_message(f"Error writing success marker for feature {feature_id}: {e}", log_file_path)
+    
+    return (True, filename)
+
+def process_all_tiles(feature_layer, base_download_directory, link_field):
+    """
+    Iterate through each selected feature in the feature layer,
+    processing each tile one at a time while tracking overall elapsed time,
+    and then writing a final summary log that includes counts and failed file names.
+    """
+    # Ensure the link field exists.
+    check_field_exists(feature_layer, link_field)
+    
+    # Get the count of selected features.
+    selected_count = get_selected_feature_count(feature_layer)
+    if selected_count == 0:
+        print("No features selected.")
+        return
+    else:
+        print(f"{selected_count} features selected. Processing starting.")
+    
+    total_files = 0
+    successful = 0
+    failed_tiles = []  # List of tuples (feature_id, filename) for failed downloads or processing.
+    process_start_time = time.time()
+    
+    # Iterate through each selected feature that has a non-null link field.
+    with arcpy.da.SearchCursor(feature_layer, ["OID@", link_field],
+                               where_clause="{} IS NOT NULL".format(arcpy.AddFieldDelimiters(feature_layer, link_field))) as cursor:
+        for row in cursor:
+            total_files += 1
+            feature_id, url = row[0], row[1]
+            print(f"\n--- Processing feature {feature_id} ---")
+            success, filename = process_tile(feature_id, url, base_download_directory)
+            if success:
+                successful += 1
+            else:
+                failed_tiles.append((feature_id, filename))
+    
+    total_process_time = time.time() - process_start_time
+    print(f"\nProcessing completed. {successful}/{total_files} features processed successfully.")
+    print(f"Total processing time for all features: {total_process_time:.2f} seconds.")
+    
+    # Write final summary log in the base download directory.
+    final_log_path = os.path.join(base_download_directory, "final_summary_log.txt")
+    try:
+        with open(final_log_path, "w") as f:
+            f.write(f"Total features: {total_files}\n")
+            f.write(f"Successfully processed: {successful}\n")
+            f.write(f"Failed to process: {len(failed_tiles)}\n")
+            if failed_tiles:
+                f.write("Failed feature IDs and file names:\n")
+                for feature_id, filename in failed_tiles:
+                    f.write(f"Feature {feature_id}: {filename}\n")
+    except Exception as e:
+        print(f"Error writing final summary log: {e}")
+
+def cleanup_intermediate_folders(base_download_directory):
+    """
+    Delete all LAZ and LAS folders from each tile folder within the base download directory.
+    """
+    for tile in os.listdir(base_download_directory):
+        tile_path = os.path.join(base_download_directory, tile)
+        if os.path.isdir(tile_path) and tile.startswith("tile_"):
+            laz_folder = os.path.join(tile_path, "LAZ")
+            las_folder = os.path.join(tile_path, "LAS")
+            if os.path.exists(laz_folder):
+                try:
+                    shutil.rmtree(laz_folder)
+                    print(f"Deleted {laz_folder}")
+                except Exception as e:
+                    print(f"Error deleting {laz_folder}: {e}")
+            if os.path.exists(las_folder):
+                try:
+                    shutil.rmtree(las_folder)
+                    print(f"Deleted {las_folder}")
+                except Exception as e:
+                    print(f"Error deleting {las_folder}: {e}")
+
+# Main script
+if __name__ == "__main__":
+    # Feature layer (as it appears in the ArcGIS project)
+    feature_layer = "2022_LiDAR_TileGrid"  # Replace with your tile grid feature layer name
+    # Base download directory (this is where per-tile folders will be created)
+    base_download_directory = r"pathway"  # Replace with your download directory path
+    # Link field containing the URL (must match the field name in the feature layer)
+    link_field = "url"  # Replace with the attribute field name (not alias) containing the URL
+    
+    process_all_tiles(feature_layer, base_download_directory, link_field)
+    
+    # At the very end, delete the LAZ and LAS folders from each tile folder.
+    cleanup_intermediate_folders(base_download_directory)
