@@ -4,6 +4,23 @@ import os
 import time
 import shutil
 
+# READ ME READ ME READ ME READ ME
+# Must be processed in ArcGIS Pro using Notebooks (see URL below for more information)
+# https://pro.arcgis.com/en/pro-app/latest/arcpy/get-started/pro-notebooks.htm
+# NVRC - 1 Map Package Per NVRC jurisdiction
+# Requires tile grid layer containing an attribute field with url links to the lidar data per tile
+# NVRC - 2022_LiDAR_TileGrid
+# Requires user to know field name, not alias, of the attribute field containing the urls for data
+# NVRC - the field name is 'url' and is case sensitive
+# Requires user to know tile grid layer name in ArcGIS Pro (not pathway)
+# NVRC - 2022_LiDAR_TileGrid
+# Requires user to define output pathway for data
+# NVRC - 1 folder per NVRC jurisdiction and 1 folder per NVRC DM Grid ID number found in the NVRC_ID attribute field column
+# NVRC - Requires NVRC Data Management (DM) layer, select tile grids using RETURN HERE TO FINISH !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# Features (the tile grids of the selected extent) must be actively selected in the tile grid layer before running the code
+# User Input Section is the only place that you will change code values anchored by quotation marks
+# Do not change anything outside of that section
+
 def log_message(message, log_file=None):
     """Log a message with timestamp. If log_file is provided, also append the message there."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
