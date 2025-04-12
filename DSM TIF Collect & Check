@@ -1,0 +1,60 @@
+import os
+import shutil
+import time
+
+# User-defined parameters
+source_folder = r"C:\Final Working Solar"  # Your existing base_download_directory
+destination_folder = r"C:\Final Working Solar\LoudounCollected_DSMs"  # Folder for copied DSMs
+duplicates_folder = os.path.join(destination_folder, "duplicates")  # Folder for duplicates
+
+# Function to copy .tif files, handling duplicates
+def copy_dsm_tifs_with_duplicates(source_dir, dest_dir, dup_dir):
+    # Ensure destination and duplicates folders exist
+    for folder in [dest_dir, dup_dir]:
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+
+    print(f"Starting search for .tif files in {source_dir}...\n")
+
+    tif_files = []
+    # Search recursively for .tif files
+    for root, dirs, files in os.walk(source_dir):
+        for file in files:
+            if file.lower().endswith('.tif'):
+                full_path = os.path.join(root, file)
+                tif_files.append(full_path)
+
+    total_files = len(tif_files)
+    print(f"Found {total_files} '.tif' files.\n")
+
+    copied_count = 0
+    duplicate_count = 0
+
+    for tif_file in tif_files:
+        file_name = os.path.basename(tif_file)
+        destination_path = os.path.join(dest_dir, file_name)
+
+        # Check if file already exists in destination
+        if os.path.exists(destination_path):
+            # Duplicate detected, copy to duplicates folder
+            duplicate_destination = os.path.join(dup_dir, file_name)
+            shutil.copy2(tif_file, duplicate_destination)
+            duplicate_count += 1
+            print(f"Duplicate found ({duplicate_count}): {file_name} copied to duplicates folder.")
+        else:
+            try:
+                shutil.copy2(tif_file, dest_dir)
+                copied_count += 1
+                print(f"Copied ({copied_count}/{total_files}): {file_name}")
+            except Exception as e:
+                print(f"Failed to copy {file_name}: {e}")
+
+    print(f"\nCopying completed. {copied_count}/{total_files} files copied successfully.")
+    print(f"Duplicates found and copied: {duplicate_count}")
+
+# Execute the function
+start_time = time.time()
+copy_dsm_tifs_with_duplicates(source_folder, destination_folder, duplicates_folder)
+end_time = time.time()
+
+print(f"\nTotal operation time: {end_time - start_time:.2f} seconds.")
